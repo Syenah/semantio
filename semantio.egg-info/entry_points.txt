@@ -1,0 +1,3 @@
+[console_scripts]
+semantio = semantio.cli.main:main
+
