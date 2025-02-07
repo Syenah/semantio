@@ -16,6 +16,7 @@ from .tools.base_tool import BaseTool
 from pathlib import Path
 import importlib
 import os
+from .memory import Memory
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -48,6 +49,13 @@ class Agent(BaseModel):
     semantic_model: Optional[Any] = Field(None, description="SentenceTransformer model for semantic matching.")
     team: Optional[List['Agent']] = Field(None, description="List of assistants in the team.")
     auto_tool: bool = Field(False, description="Whether to automatically detect and call tools.")
+    memory: Memory = Field(default_factory=Memory)
+    memory_config: Dict = Field(
+        default_factory=lambda: {
+            "max_context_length": 4000,
+            "summarization_threshold": 3000
+        }
+    )
     
     # Allow arbitrary types
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -56,6 +64,11 @@ class Agent(BaseModel):
         super().__init__(**kwargs)
         # Initialize the model and tools here if needed
         self._initialize_model()
+        # Initialize memory with config
+        self.memory = Memory(
+            max_context_length=self.memory_config.get("max_context_length", 4000),
+            summarization_threshold=self.memory_config.get("summarization_threshold", 3000)
+        )
         # Initialize tools as an empty list if not provided
         if self.tools is None:
             self.tools = []
@@ -218,20 +231,31 @@ class Agent(BaseModel):
         markdown: bool = False,
         team: Optional[List['Agent']] = None,
         **kwargs,
-    ) -> Union[str, Dict]:  # Add return type hint
+    ) -> Union[str, Dict]:
         """Print the agent's response to the console and return it."""
+    
+        # Store user message if provided
+        if message and isinstance(message, str):
+            self.memory.add_message(role="user", content=message)
 
         if stream:
             # Handle streaming response
             response = ""
             for chunk in self._stream_response(message, markdown=markdown, **kwargs):
-                print(chunk)
+                print(chunk, end="", flush=True)
                 response += chunk
+            # Store agent response
+            if response:
+                self.memory.add_message(role="assistant", content=response)
+            print()  # New line after streaming
             return response
         else:
             # Generate and return the response
             response = self._generate_response(message, markdown=markdown, team=team, **kwargs)
             print(response)  # Print the response to the console
+            # Store agent response
+            if response:
+                self.memory.add_message(role="assistant", content=response)
             return response
 
 
@@ -294,12 +318,10 @@ class Agent(BaseModel):
         # Use the specified team if provided
         if team is not None:
             return self._generate_team_response(message, team, markdown=markdown, **kwargs)
-
         # Initialize tool_outputs as an empty dictionary
         tool_outputs = {}
         responses = []
         tool_calls = []
-
         # Use the LLM to analyze the query and dynamically select tools when auto_tool is enabled
         if self.auto_tool:
             tool_calls = self._analyze_query_and_select_tools(message)
@@ -347,13 +369,17 @@ class Agent(BaseModel):
             try:
                 # Prepare the context for the LLM
                 context = {
+                    "conversation_history": self.memory.get_context(self.llm_instance),
                     "tool_outputs": tool_outputs,
                     "rag_context": self.rag.retrieve(message) if self.rag else None,
-                    "knowledge_base_context": self._find_all_relevant_keys(message, self._flatten_data(self.knowledge_base)) if self.knowledge_base else None,
+                    "knowledge_base": self._get_knowledge_context(message) if self.knowledge_base else None,
                 }
-
+                # 3. Build a memory-aware prompt.
+                prompt = self._build_memory_prompt(message, context)
+                # To (convert MemoryEntry objects to dicts and remove metadata):
+                memory_entries = [{"role": e.role, "content": e.content} for e in self.memory.storage.retrieve()]
                 # Generate a response using the LLM
-                llm_response = self.llm_instance.generate(prompt=message, context=context, **kwargs)
+                llm_response = self.llm_instance.generate(prompt=prompt, context=context, memory=memory_entries, **kwargs)
                 responses.append(f"**Analysis:**\n\n{llm_response}")
             except Exception as e:
                 logger.error(f"Failed to generate LLM response: {e}")
@@ -363,25 +389,30 @@ class Agent(BaseModel):
             # Retrieve relevant context using RAG
             rag_context = self.rag.retrieve(message) if self.rag else None
             # Retrieve relevant context from the knowledge base (API result)
-            knowledge_base_context = None
-            if self.knowledge_base:
-                # Flatten the knowledge base
-                flattened_data = self._flatten_data(self.knowledge_base)
-                # Find all relevant key-value pairs in the knowledge base
-                relevant_values = self._find_all_relevant_keys(message, flattened_data)
-                if relevant_values:
-                    knowledge_base_context = ", ".join(relevant_values)
+            # knowledge_base_context = None
+            # if self.knowledge_base:
+            #     # Flatten the knowledge base
+            #     flattened_data = self._flatten_data(self.knowledge_base)
+            #     # Find all relevant key-value pairs in the knowledge base
+            #     relevant_values = self._find_all_relevant_keys(message, flattened_data)
+            #     if relevant_values:
+            #         knowledge_base_context = ", ".join(relevant_values)
 
             # Combine both contexts (RAG and knowledge base)
             context = {
+                "conversation_history": self.memory.get_context(self.llm_instance),
                 "rag_context": rag_context,
-                "knowledge_base_context": knowledge_base_context,
+                "knowledge_base": self._get_knowledge_context(message),
             }
             # Prepare the prompt with instructions, description, and context
-            prompt = self._build_prompt(message, context)
+            # 3. Build a memory-aware prompt.
+            prompt = self._build_memory_prompt(message, context)
+            # To (convert MemoryEntry objects to dicts and remove metadata):
+            memory_entries = [{"role": e.role, "content": e.content} for e in self.memory.storage.retrieve()]
 
             # Generate the response using the LLM
-            response = self.llm_instance.generate(prompt=prompt, context=context, **kwargs)
+            response = self.llm_instance.generate(prompt=prompt, context=context, memory=memory_entries, **kwargs)
+
 
             # Format the response based on the json_output flag
             if self.json_output:
@@ -394,9 +425,37 @@ class Agent(BaseModel):
             if markdown:
                 return f"**Response:**\n\n{response}"
             return response
-        # Combine all responses into a single string
         return "\n\n".join(responses)
     
+    # Modified prompt construction with memory integration
+    def _build_memory_prompt(self, user_input: str, context: dict) -> str:
+        """Enhanced prompt builder with memory context."""
+        prompt_parts = []
+        
+        if self.description:
+            prompt_parts.append(f"# ROLE\n{self.description}")
+            
+        if self.instructions:
+            prompt_parts.append(f"# INSTRUCTIONS\n" + "\n".join(f"- {i}" for i in self.instructions))
+            
+        if context['conversation_history']:
+            prompt_parts.append(f"# CONVERSATION HISTORY\n{context['conversation_history']}")
+            
+        if context['knowledge_base']:
+            prompt_parts.append(f"# KNOWLEDGE BASE\n{context['knowledge_base']}")
+            
+        prompt_parts.append(f"# USER INPUT\n{user_input}")
+        
+        return "\n\n".join(prompt_parts)
+        
+    def _get_knowledge_context(self, message: str) -> str:
+        """Retrieve and format knowledge base context."""
+        if not self.knowledge_base:
+            return ""
+        
+        flattened = self._flatten_data(self.knowledge_base)
+        relevant = self._find_all_relevant_keys(message, flattened)
+        return "\n".join(f"- {item}" for item in relevant) if relevant else ""
     def _generate_team_response(self, message: str, team: List['Agent'], markdown: bool = False, **kwargs) -> str:
         """Generate a response using a team of assistants."""
         responses = []
@@ -543,16 +602,20 @@ class Agent(BaseModel):
         """Run the agent in a CLI app."""
         from rich.prompt import Prompt
 
+        # Print initial message if provided
         if message:
             self.print_response(message=message, **kwargs)
 
         _exit_on = exit_on or ["exit", "quit", "bye"]
         while True:
-            message = Prompt.ask(f"[bold] {self.emoji} {self.user_name} [/bold]")
-            if message in _exit_on:
+            try:
+                message = Prompt.ask(f"[bold] {self.emoji} {self.user_name} [/bold]")
+                if message in _exit_on:
+                    break
+                self.print_response(message=message, **kwargs)
+            except KeyboardInterrupt:
+                print("\n\nSession ended. Goodbye!")
                 break
-
-            self.print_response(message=message, **kwargs)
 
     def _generate_api(self):
         """Generate an API for the agent if api=True."""
