@@ -15,7 +15,6 @@ sentence-transformers
 fuzzywuzzy
 duckduckgo-search
 yfinance
-selenium
 beautifulsoup4
 webdriver-manager
 validators

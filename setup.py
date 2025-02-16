@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="semantio",
-    version="0.0.6",
+    version="0.0.7",
     description="A powerful SDK for building AI agents",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
@@ -28,7 +28,6 @@ setup(
         "fuzzywuzzy", # For fuzzy string matching
         "duckduckgo-search", # For DuckDuckGo search
         "yfinance",   # For stock/crypto prices
-        "selenium",   # For web scraping
         "beautifulsoup4", # For HTML parsing
         "webdriver-manager", # For browser automation
         "validators", # For URL validation
