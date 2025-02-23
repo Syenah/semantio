@@ -1,15 +1,15 @@
 from .fastapi_app import create_fastapi_app  # Import the factory function
 
 class APIGenerator:
-    def __init__(self, assistant):
+    def __init__(self, agent):
         """
-        Initialize the APIGenerator with the given assistant.
+        Initialize the APIGenerator with the given agent.
 
         Args:
-            assistant: The assistant instance for which the API is being created.
+            agent: The agent instance for which the API is being created.
         """
-        self.assistant = assistant
-        self.app = create_fastapi_app(assistant, assistant.api_config)  # Pass api_config to create_fastapi_app
+        self.agent = agent
+        self.app = create_fastapi_app(agent, agent.api_config)  # Pass api_config to create_fastapi_app
 
     def run(self, host: str = "0.0.0.0", port: int = 8000):
         """

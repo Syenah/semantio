@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="semantio",
-    version="0.0.7",
+    version="0.0.8",
     description="A powerful SDK for building AI agents",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
@@ -31,6 +31,9 @@ setup(
         "beautifulsoup4", # For HTML parsing
         "webdriver-manager", # For browser automation
         "validators", # For URL validation
+        "PyPDF2",    # For PDF parsing
+        "youtube-transcript-api", # For YouTube transcripts
+        "pandas",    # For data manipulation
 
     ],
     classifiers=[
